@@ -302,8 +302,51 @@ class GPT(nn.Module):
         mfu = flops_achieved / flops_promised
         return mfu
 
+    # @torch.no_grad()
+    # def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    #     """
+    #     Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    #     the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    #     Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+    #     """
+    #     for _ in range(max_new_tokens):
+    #         # if the sequence context is growing too long we must crop it at block_size
+    #         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+    #         # forward the model to get the logits for the index in the sequence
+    #         logits, _ = self(idx_cond)
+    #         # pluck the logits at the final step and scale by desired temperature
+    #         logits = logits[:, -1, :] / temperature
+    #         # optionally crop the logits to only the top k options
+    #         if top_k is not None:
+    #             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    #             logits[logits < v[:, [-1]]] = -float('Inf')
+    #         # apply softmax to convert logits to (normalized) probabilities
+    #         probs = F.softmax(logits, dim=-1)
+        
+    #         # sample from the distribution
+    #         idx_next = torch.multinomial(probs, num_samples=1)
+    #         # append sampled index to the running sequence and continue
+    #         idx = torch.cat((idx, idx_next), dim=1)
+
+    #     return idx
+
+
+
+class BaseSampler:
+    def __init__(self, model, *args, **kwargs):
+        pass
+    
+    def generate(self, idx,  max_new_tokens):
+        pass
+
+class TopKSampler(BaseSampler):
+    def __init__(self, model, temperature=1.0, topk=None):
+        self.model = model
+        self.temperature = temperature
+        self.topk = topk
+    
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -311,20 +354,111 @@ class GPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            idx_cond = idx if idx.size(1) <= self.model.config.block_size else idx[:, -self.model.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self.model(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :] / self.temperature
             # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            if self.topk is not None:
+                v, _ = torch.topk(logits, min(self.topk, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
+        
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+    
+    
+
+class TopPSampler(BaseSampler):
+    def __init__(self, model, topp, topk, temperature=1.0):
+        self.model = model
+        self.topp = topp
+        self.temperature = temperature
+        self.topk = topk
+        assert self.topp is not None
+    
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.model.config.block_size else idx[:, -self.model.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self.model(idx_cond)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / self.temperature
+            
+            v, _ = torch.topk(logits, min(self.topk, logits.size(-1)))
+            indices_to_remove_k = logits < v[:, [-1]]
+            indices_to_keep_k = ~indices_to_remove_k
+            
+            
+            
+            
+            
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            # 0, 0.1, 0.25, 0.91, 0.95
+            sorted_indices_to_remove = cumulative_probs > self.topp
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            
+            # 0, 0, 0, 1, 1
+            # sorted_indices_to_keep = ~sorted_indices_to_remove
+            # print(cumulative_probs.shape)
+            
+            # print("sum : ", torch.max(cumulative_probs[:,sorted_indices_to_keep[0,:]], dim=1))
+            sorted_indices_to_remove[..., 0] = 0
+            sorted_indices_to_remove[..., self.topk:] = 1
+            # print(sorted_indices_to_remove)
+            # print(sorted_logits)
+            # print(cumulative_probs)
+            # print(sorted_indices_to_remove)
+            # print(sorted_indices_to_remove.shape)
+
+            
+            
+            # 00100000011110
+            # 00011100011110
+            
+            
+            # do something
+            indices_to_remove = torch.zeros_like(logits, dtype=torch.bool).scatter_(
+                dim=-1, index=sorted_indices, src=sorted_indices_to_remove
+            )
+            # print(indices_to_remove)
+            # print(indices_to_keep_k.shape, indices_to_remove.shape)
+            # if indices_to_remove_k.shape[-1] >indices_to_remove.shape[-1]:
+            #     indices_to_remove_all =  indices_to_remove_k
+            # else:
+            #     indices_to_remove_all = indices_to_remove
+            
+            # print("all", indices_to_remove_all.shape)
+            logits[indices_to_remove] = -float('Inf')
+            
+            # indices_to_keep_p = ~indices_to_remove
+            
+            
+            
+            
+            #gemeration
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            
+            
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+            # assert False
+            
+        return idx
+        
+    

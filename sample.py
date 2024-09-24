@@ -6,7 +6,7 @@ import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
-from model import GPTConfig, GPT
+from model import GPTConfig, GPT, TopKSampler, TopPSampler
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
@@ -80,10 +80,14 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
+# sampler = TopKSampler(model, temperature=temperature, topk=top_k)
+sampler = TopPSampler(model, topp=0.9, topk=top_k, temperature=temperature)
+
+
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y = sampler.generate(x, max_new_tokens)
             print(decode(y[0].tolist()))
             print('---------------')
